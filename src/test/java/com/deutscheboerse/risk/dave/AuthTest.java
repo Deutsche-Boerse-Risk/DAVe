@@ -1,6 +1,7 @@
 package com.deutscheboerse.risk.dave;
 
 import com.deutscheboerse.risk.dave.auth.JWKSAuthProviderImpl;
+import com.deutscheboerse.risk.dave.healthcheck.HealthCheck;
 import com.deutscheboerse.risk.dave.persistence.EchoPersistenceService;
 import com.deutscheboerse.risk.dave.persistence.PersistenceService;
 import com.deutscheboerse.risk.dave.utils.TestConfig;
@@ -67,7 +68,7 @@ public class AuthTest {
             }
         });
 
-        asyncStart.awaitSuccess();
+        asyncStart.awaitSuccess(5000);
     }
 
     private HttpServer createOpenIdMockServer(String jwksCerts) {
@@ -102,7 +103,9 @@ public class AuthTest {
     @Test
     public void testValidJWT(TestContext context) throws URISyntaxException {
         HttpServer openIdMockServer = this.createOpenIdMockServer(CERTS_VALID);
-        openIdMockServer.listen(TestConfig.OPENID_PORT);
+        Async openIdStarted = context.async();
+        openIdMockServer.listen(TestConfig.OPENID_PORT, context.asyncAssertSuccess(i -> openIdStarted.complete()));
+        openIdStarted.awaitSuccess(5000);
         JsonObject config = TestConfig.getApiConfig();
         config.getJsonObject("auth").put("enable", true);
         deployApiVerticle(context, config);
@@ -121,13 +124,13 @@ public class AuthTest {
     }
 
     @Test
-    public void testFailingOpenId(TestContext context) throws URISyntaxException {
-        this.testFailingAuth(context, this.createOpenIdMockServerFailing(), JWT_TOKEN);
+    public void testFailingOpenId(TestContext context) throws URISyntaxException, InterruptedException {
+        this.testFailingServer(context, this.createOpenIdMockServerFailing());
     }
 
     @Test
-    public void testInvalidJwksUrl(TestContext context) throws URISyntaxException {
-        this.testFailingAuth(context, this.createOpenIdMockServerInvalidJwks(), JWT_TOKEN);
+    public void testInvalidJwksUrl(TestContext context) throws URISyntaxException, InterruptedException {
+        this.testFailingServer(context, this.createOpenIdMockServerInvalidJwks());
     }
 
     @Test
@@ -176,7 +179,9 @@ public class AuthTest {
     }
 
     private void testFailingAuth(TestContext context, HttpServer openIdServer, String jwtToken) {
-        openIdServer.listen(TestConfig.OPENID_PORT);
+        Async openIdStarted = context.async();
+        openIdServer.listen(TestConfig.OPENID_PORT, context.asyncAssertSuccess(i -> openIdStarted.complete()));
+        openIdStarted.awaitSuccess(5000);
         JsonObject config = TestConfig.getApiConfig();
         config.getJsonObject("auth").put("enable", true);
         deployApiVerticle(context, config);
@@ -189,10 +194,26 @@ public class AuthTest {
         openIdServer.close(context.asyncAssertSuccess());
     }
 
+    private void testFailingServer(TestContext context, HttpServer openIdServer) throws InterruptedException {
+        Async openIdStarted = context.async();
+        openIdServer.listen(TestConfig.OPENID_PORT, context.asyncAssertSuccess(i -> openIdStarted.complete()));
+        openIdStarted.awaitSuccess(5000);
+        JsonObject config = TestConfig.getApiConfig();
+        config.getJsonObject("auth").put("enable", true);
+        Async deployFailed = context.async();
+        vertx.deployVerticle(ApiVerticle.class.getName(), new DeploymentOptions().setConfig(config),
+                context.asyncAssertFailure(i -> deployFailed.complete()));
+        deployFailed.awaitSuccess(5000);
+        context.assertFalse(new HealthCheck(vertx).isComponentReady(HealthCheck.Component.API));
+        openIdServer.close(context.asyncAssertSuccess());
+    }
+
     @Test
     public void testCSRF(TestContext context) throws InterruptedException, URISyntaxException {
         HttpServer openIdMockServer = this.createOpenIdMockServer(CERTS_VALID);
-        openIdMockServer.listen(TestConfig.OPENID_PORT);
+        Async openIdStarted = context.async();
+        openIdMockServer.listen(TestConfig.OPENID_PORT, context.asyncAssertSuccess(i -> openIdStarted.complete()));
+        openIdStarted.awaitSuccess(5000);
         JsonObject config = TestConfig.getApiConfig();
         config.getJsonObject("auth").put("enable", true);
         config.getJsonObject("csrf").put("enable", true);

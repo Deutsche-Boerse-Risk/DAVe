@@ -7,8 +7,9 @@ import com.deutscheboerse.risk.dave.persistence.PersistenceService;
 import com.deutscheboerse.risk.dave.restapi.MarginApiFactory;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.vertx.core.AbstractVerticle;
-import io.vertx.core.CompositeFuture;
+import io.vertx.core.AsyncResult;
 import io.vertx.core.Future;
+import io.vertx.core.Handler;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.ClientAuth;
 import io.vertx.core.http.HttpMethod;
@@ -20,14 +21,11 @@ import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 import io.vertx.core.net.PemKeyCertOptions;
 import io.vertx.core.net.PemTrustOptions;
-import io.vertx.ext.auth.jwt.JWTAuth;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.handler.*;
 import io.vertx.serviceproxy.ProxyHelper;
 
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 import java.util.stream.Collectors;
 
 import static com.deutscheboerse.risk.dave.healthcheck.HealthCheck.Component.API;
@@ -57,11 +55,7 @@ public class ApiVerticle extends AbstractVerticle {
 
         HealthCheck healthCheck = new HealthCheck(this.vertx);
 
-        List<Future> futures = new ArrayList<>();
-        futures.add(startHttpServer());
-
-        CompositeFuture.all(futures).setHandler(ar ->
-        {
+        startHttpServer().setHandler(ar -> {
             if (ar.succeeded()) {
                 healthCheck.setComponentReady(API);
                 startFuture.complete();
@@ -88,14 +82,17 @@ public class ApiVerticle extends AbstractVerticle {
 
     private Future<HttpServer> startHttpServer() {
         Future<HttpServer> webServerFuture = Future.future();
-        Router router = configureRouter();
-        HttpServerOptions httpOptions = configureWebServer();
+        Future<Void> routerFuture = Future.future();
+        Router router = configureRouter(routerFuture);
 
-        int port = config.getPort();
-        LOG.info("Starting web server on port {}", port);
-        server = vertx.createHttpServer(httpOptions)
-                .requestHandler(router::accept)
-                .listen(port, webServerFuture.completer());
+        routerFuture.compose(i -> {
+            HttpServerOptions httpOptions = configureWebServer();
+            int port = config.getPort();
+            LOG.info("Starting web server on port {}", port);
+            server = vertx.createHttpServer(httpOptions)
+                    .requestHandler(router::accept)
+                    .listen(port, webServerFuture);
+        }, webServerFuture);
 
         return webServerFuture;
     }
@@ -137,11 +134,11 @@ public class ApiVerticle extends AbstractVerticle {
         }
     }
 
-    private Router configureRouter() {
+    private Router configureRouter(Handler<AsyncResult<Void>> resultHandler) {
         Router router = Router.router(vertx);
 
         setCorsHandler(router);
-        setAuthHandler(router);
+        setAuthHandler(router, resultHandler);
 
         LOG.info("Adding route REST API");
         router.route(API_PREFIX+"/*").handler(BodyHandler.create());
@@ -182,16 +179,19 @@ public class ApiVerticle extends AbstractVerticle {
         }
     }
 
-    private void setAuthHandler(Router router) {
+    private void setAuthHandler(Router router, Handler<AsyncResult<Void>> resultHandler) {
         if (config.getAuth().isEnable()) {
             LOG.info("Enabling authentication");
 
-            JWTAuth jwksAuthenticationProvider = new JWKSAuthProviderImpl(vertx, config.getAuth());
+            JWKSAuthProviderImpl jwksAuthenticationProvider = new JWKSAuthProviderImpl(vertx, config.getAuth());
+            jwksAuthenticationProvider.load(resultHandler);
             router.route(API_PREFIX + "/*").handler(JWTAuthHandler.create(jwksAuthenticationProvider));
 
             router.route().handler(BodyHandler.create().setBodyLimit(MAX_BODY_SIZE));
             setCsrfHandler(router);
             addSecurityHeaders(router);
+        } else {
+            resultHandler.handle(Future.succeededFuture());
         }
     }
 

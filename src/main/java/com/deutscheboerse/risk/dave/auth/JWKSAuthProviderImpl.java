@@ -1,9 +1,6 @@
 package com.deutscheboerse.risk.dave.auth;
 
-import com.auth0.jwk.GuavaCachedJwkProvider;
-import com.auth0.jwk.Jwk;
-import com.auth0.jwk.JwkProvider;
-import com.auth0.jwk.UrlJwkProvider;
+import com.auth0.jwk.*;
 import com.deutscheboerse.risk.dave.config.ApiConfig;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
@@ -41,8 +38,9 @@ public class JWKSAuthProviderImpl implements JWTAuth {
 
     private final Cache<String, JWT> cache;
     private final String permissionsClaimKey;
-    private final String clientId;
-    private Optional<JwkProvider> jwkProvider = Optional.empty();
+    private final Vertx vertx;
+    private final ApiConfig.AuthConfig config;
+    private JwkProvider jwkProvider = null;
     private String issuer;
 
     public JWKSAuthProviderImpl(Vertx vertx, ApiConfig.AuthConfig config) {
@@ -52,11 +50,15 @@ public class JWKSAuthProviderImpl implements JWTAuth {
                 .build();
 
         this.permissionsClaimKey = "permissions";
-        this.clientId = config.getClientId();
-        this.loadWellKnownFields(vertx, config.getWellKnownUrl());
+        this.config = config;
+        this.vertx = vertx;
     }
 
-    private void loadWellKnownFields(Vertx vertx, String wellKnownUrl) {
+    public void load(Handler<AsyncResult<Void>> resultHandler) {
+        this.loadWellKnownFields(this.vertx, this.config.getWellKnownUrl(), resultHandler);
+    }
+
+    private void loadWellKnownFields(Vertx vertx, String wellKnownUrl, Handler<AsyncResult<Void>> resultHandler) {
         WebClientOptions options = new WebClientOptions();
         if (!"none".equalsIgnoreCase(PROXY_HOST)) {
             options.setProxyOptions(new ProxyOptions()
@@ -69,23 +71,26 @@ public class JWKSAuthProviderImpl implements JWTAuth {
                 .ssl(wellKnownUrl.startsWith("https://") ? true : false)
                 .send(ar -> {
                     if (ar.succeeded()) {
-                        JsonObject response = ar.result().bodyAsJsonObject();
-                        this.parseAndStoreWellKnownFields(Optional.ofNullable(response));
+                        JsonObject response = Optional.ofNullable(ar.result().bodyAsJsonObject()).orElseGet(JsonObject::new);
+                        this.parseAndStoreWellKnownFields(response, resultHandler);
                     } else {
                         LOG.error("Unable to retrieve well known fields from {}", wellKnownUrl, ar.cause());
+                        resultHandler.handle(Future.failedFuture(ar.cause()));
                     }
                 });
     }
 
-    private void parseAndStoreWellKnownFields(Optional<JsonObject> wellKnownFields) {
-        this.issuer = wellKnownFields.orElseGet(JsonObject::new).getString("issuer", "");
-        String jwksUri = wellKnownFields.orElseGet(JsonObject::new).getString("jwks_uri", "");
+    private void parseAndStoreWellKnownFields(JsonObject wellKnownFields, Handler<AsyncResult<Void>> resultHandler) {
+        this.issuer = wellKnownFields.getString("issuer", "");
+        String jwksUri = wellKnownFields.getString("jwks_uri", "");
         try {
             JwkProvider urlJwkProvider = new UrlJwkProvider(new URL(jwksUri));
-            this.jwkProvider = Optional.of(new GuavaCachedJwkProvider(urlJwkProvider));
+            this.jwkProvider = new GuavaCachedJwkProvider(urlJwkProvider);
             LOG.info("Initializing Jwks Provider with jwks_uri: {}, issuer: {}", jwksUri, this.issuer);
+            resultHandler.handle(Future.succeededFuture());
         } catch (MalformedURLException e) {
             LOG.error("Unable to create Jwk Provider on '{}'", jwksUri, e);
+            resultHandler.handle(Future.failedFuture(e));
         }
     }
 
@@ -108,7 +113,7 @@ public class JWKSAuthProviderImpl implements JWTAuth {
         String kid = this.getKid(jwtToken);
         LOG.debug("Retrieved kid '{}' from token", kid);
         return this.cache.get(kid, () -> {
-            Jwk jwk = this.jwkProvider.orElseThrow(() -> new RuntimeException("JwkProvider not constructed")).get(kid);
+            Jwk jwk = this.jwkProvider.get(kid);
             byte[] encodedPublicKey = jwk.getPublicKey().getEncoded();
             String b64PublicKey = Base64.getEncoder().encodeToString(encodedPublicKey);
                 LOG.info("Retrieved jwk key: {}", jwk.toString());
@@ -138,18 +143,19 @@ public class JWKSAuthProviderImpl implements JWTAuth {
             }
 
             JsonArray target;
+            String clientId = this.config.getClientId();
             if (payload.getValue("aud") instanceof String) {
                 target = new JsonArray().add(payload.getValue("aud", ""));
             } else {
                 target = payload.getJsonArray("aud", new JsonArray());
-                if(!payload.getString("azp", "").equals(this.clientId)) {
-                    resultHandler.handle(Future.failedFuture("Invalid JWT audient. expected: " + this.clientId));
+                if(!payload.getString("azp", "").equals(clientId)) {
+                    resultHandler.handle(Future.failedFuture("Invalid JWT audient. expected: " + clientId));
                     return;
                 }
             }
 
-            if (!target.getList().contains(this.clientId)) {
-                resultHandler.handle(Future.failedFuture("Invalid JWT audient. expected: " + this.clientId));
+            if (!target.getList().contains(clientId)) {
+                resultHandler.handle(Future.failedFuture("Invalid JWT audient. expected: " + clientId));
                 return;
             }
 
