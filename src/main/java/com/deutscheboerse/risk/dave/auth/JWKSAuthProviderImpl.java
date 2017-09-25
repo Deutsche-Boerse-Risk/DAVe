@@ -55,10 +55,6 @@ public class JWKSAuthProviderImpl implements JWTAuth {
     }
 
     public void load(Handler<AsyncResult<Void>> resultHandler) {
-        this.loadWellKnownFields(this.vertx, this.config.getWellKnownUrl(), resultHandler);
-    }
-
-    private void loadWellKnownFields(Vertx vertx, String wellKnownUrl, Handler<AsyncResult<Void>> resultHandler) {
         WebClientOptions options = new WebClientOptions();
         if (!"none".equalsIgnoreCase(PROXY_HOST)) {
             options.setProxyOptions(new ProxyOptions()
@@ -66,7 +62,8 @@ public class JWKSAuthProviderImpl implements JWTAuth {
                     .setHost(PROXY_HOST)
                     .setPort(PROXY_PORT));
         }
-        WebClient.create(vertx, options)
+        String wellKnownUrl = this.config.getWellKnownUrl();
+        WebClient.create(this.vertx, options)
                 .getAbs(wellKnownUrl)
                 .ssl(wellKnownUrl.startsWith("https://") ? true : false)
                 .send(ar -> {
